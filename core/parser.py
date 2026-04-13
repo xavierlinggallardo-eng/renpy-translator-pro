@@ -88,12 +88,6 @@ RE_TRANSLATE_ACTIVE = re.compile(
     r'^(?P<indent>\s*)(?:(?P<char>[a-zA-Z_]\w*)\s+)?' + _QSTR + r'\s*$'
 )
 
-# NVL
-RE_NVL = re.compile(
-    r'^(?P<indent>\s*)(?P<char>[a-zA-Z_]\w*)\s+nvl\s+' + _QSTR + r'\s*$'
-    r'|^(?P<indent2>\s*)nvl\s+' + _QSTR + r'\s*$'
-)
-
 # String viejo/nuevo en bloques translate string
 RE_OLD_NEW = re.compile(
     r'^(?P<indent>\s*)(?P<kw>old|new)\s+' + _QSTR + r'\s*$'
