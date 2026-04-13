@@ -22,7 +22,7 @@ def _escape_for_renpy(text: str, quote_char: str) -> str:
 def reinsert(
     segments: List[Segment],
     translations: Dict[int, str],  # line_no -> translated text
-    project_dir: str,
+    project_dir: str,              # carpeta raíz de los .rpy (game/ o raíz del proyecto)
     output_dir: str,
     log_callback=None,
 ) -> int:
