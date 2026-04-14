@@ -101,8 +101,8 @@ def _is_char(token: str) -> bool:
     """¿Puede ser un ID de personaje Ren'Py?"""
     return (token not in _KW and
             token.lower() not in _KW and
-            bool(re.match(r'^[a-zA-Z_]\w*$', token)) and
-            not token[0].isupper())  # los IDs suelen ser minúsculas
+            bool(re.match(r'^[a-zA-Z_]\w*$', token)))
+    # NOTA: NO filtramos mayúsculas — muchos juegos usan MC, V, A, B, etc.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,17 +339,19 @@ class RenpyParser:
         content = stripped.lstrip()
         indent_n = len(stripped) - len(content)
 
-        if not content or content.startswith(('#', '$', '//', 'translate', 'label',
-                                               'screen', 'init', 'python', 'define',
-                                               'default', 'image', 'transform', 'style',
-                                               'if ', 'elif ', 'else:', 'while ', 'for ',
-                                               'with ', 'show ', 'hide ', 'scene ', 'play ',
-                                               'stop ', 'queue ', 'call ', 'jump ', 'return',
-                                               'pass', 'window', 'nvl ', 'pause', 'voice ',
-                                               'menu', 'vbox', 'hbox', 'frame', 'add ',
-                                               'null', 'bar', 'key ', 'timer', 'viewport',
-                                               'side', 'grid', 'fixed', 'button', 'use ',
-                                               'at ', 'onlayer', 'zorder')):
+        # Prefijos que definitivamente NO son diálogo
+        _SKIP = ('$', '//', '#',
+                 'translate ', 'screen ', 'init ', 'init:', 'python:',
+                 'python ', 'define ', 'default ', 'image ', 'transform ',
+                 'style ', 'show ', 'hide ', 'scene ', 'play ', 'stop ',
+                 'queue ', 'call ', 'jump ', 'return', 'pass',
+                 'window ', 'pause', 'voice ', 'vbox:', 'hbox:', 'frame:',
+                 'null', 'bar ', 'key ', 'timer ', 'viewport:',
+                 'grid:', 'fixed:', 'button:', 'use ', 'onlayer', 'zorder',
+                 'if (', 'elif ', 'else:', 'while ', 'for ',
+                 'with dissolve', 'with fade', 'with None',
+                 )
+        if not content or any(content.startswith(s) for s in _SKIP):
             return None
 
         tokens = content.split()
@@ -396,11 +398,11 @@ class RenpyParser:
         if char_id.lower() in _KW:
             return None
 
-        # Debe ser un identificador válido
+        # Debe ser un identificador válido (permite mayúsculas: MC, V, A, B...)
         if not re.match(r'^[a-zA-Z_]\w*$', char_id):
             return None
 
-        # Los tokens intermedios (atributos) deben ser palabras simples
+        # Los tokens intermedios (atributos) deben ser palabras o @ - para expresiones
         for attr in parts[1:]:
             if not re.match(r'^[a-zA-Z_@\-]\w*$', attr):
                 return None
