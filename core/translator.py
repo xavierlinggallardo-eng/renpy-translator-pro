@@ -148,9 +148,17 @@ class Translator:
                 f"({(cache_hits + done)/max(len(all_texts),1)*100:.1f}%)"
             )
 
+        translated_count = sum(1 for v in translations.values() if v)
+        failed_count = len(all_texts) - translated_count
+        if failed_count > 0:
+            self.log(f"[Translate] ⚠ {failed_count} segmentos sin traducir.")
+            if translated_count == 0:
+                self.log("[Translate] ⚠ NINGÚN segmento fue traducido.")
+                self.log("[Translate] Verifica que el motor esté bien configurado.")
+                self.log("[Translate] Para Argos: el pack de idioma debe estar instalado.")
+                self.log("[Translate] Para Gemini/OpenAI: verifica tu API key en Ajustes.")
         self.log(
-            f"[Translate] Done. "
-            f"Translated: {len(translations)}/{len(segments)} segments."
+            f"[Translate] Listo: {translated_count}/{len(all_texts)} únicos traducidos."
         )
         return translations
 
