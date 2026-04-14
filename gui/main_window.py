@@ -1,6 +1,8 @@
 """
-Ren'Py Translator Pro — GUI v2.1
-Layout rediseñado: panel izquierdo compacto, todos los botones siempre visibles.
+Ren'Py Translator Pro — GUI v3.0
+Implementa el mismo enfoque que Zenpy:
+- Modo Zenpy: usa renpy translate para generar tl/ y traduce esos archivos
+- Modo Parser: extrae texto con parser propio (fallback)
 """
 
 import os
@@ -22,8 +24,9 @@ from utils.exe_detector import (
 )
 from engines.registry import ENGINE_NAMES, get_engine
 from core.translator import Translator
+from core.parser import RenpyParser
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "3.0.0"
 
 LANGUAGES = [
     "Spanish", "French", "German", "Italian", "Portuguese",
@@ -34,16 +37,25 @@ LANGUAGES = [
     "Bulgarian", "Croatian", "Slovak", "Slovenian",
 ]
 
+LANG_CODES = {
+    "Spanish":"spanish","French":"french","German":"german","Italian":"italian",
+    "Portuguese":"portuguese","Russian":"russian","Japanese":"japanese",
+    "Chinese":"schinese","Korean":"korean","Arabic":"arabic","Dutch":"dutch",
+    "Polish":"polish","Turkish":"turkish","Hindi":"hindi","Vietnamese":"vietnamese",
+    "Indonesian":"indonesian","Thai":"thai","Czech":"czech","Swedish":"swedish",
+    "Ukrainian":"ukrainian","Greek":"greek","Romanian":"romanian",
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ventana de Ajustes
+# Settings
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent, config, on_save):
         super().__init__(parent)
         self.title("⚙  Ajustes")
-        self.geometry("500x540")
+        self.geometry("520x580")
         self.resizable(False, False)
         self.grab_set()
         self.config_data = dict(config)
@@ -55,23 +67,22 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="API Keys y Preferencias",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(padx=20, pady=(16,6))
         fields = [
-            ("Google Gemini API Key (gratis en aistudio.google.com):", "gemini_api_key"),
+            ("Google Gemini API Key (gratis — aistudio.google.com/apikey):", "gemini_api_key"),
             ("OpenAI API Key:", "openai_api_key"),
             ("DeepL API Key:", "deepl_api_key"),
             ("LibreTranslate URL:", "libre_url"),
-            ("LibreTranslate API Key:", "libre_api_key"),
+            ("LibreTranslate API Key (opcional):", "libre_api_key"),
         ]
         self._vars = {}
         for label, key in fields:
             ctk.CTkLabel(self, text=label, anchor="w").pack(**pad, fill="x")
             show = "*" if "key" in key.lower() else ""
             var = ctk.StringVar(value=self.config_data.get(key, ""))
-            ctk.CTkEntry(self, textvariable=var, width=440, show=show).pack(**pad)
+            ctk.CTkEntry(self, textvariable=var, width=460, show=show).pack(**pad)
             self._vars[key] = var
-
         ctk.CTkLabel(self, text="Motor por defecto:", anchor="w").pack(**pad, fill="x")
         self._engine_var = ctk.StringVar(value=self.config_data.get("default_engine", ENGINE_NAMES[0]))
-        ctk.CTkOptionMenu(self, variable=self._engine_var, values=ENGINE_NAMES, width=440).pack(**pad)
+        ctk.CTkOptionMenu(self, variable=self._engine_var, values=ENGINE_NAMES, width=460).pack(**pad)
         ctk.CTkButton(self, text="💾  Guardar", width=180, height=36, command=self._save).pack(pady=18)
 
     def _save(self):
@@ -83,31 +94,24 @@ class SettingsWindow(ctk.CTkToplevel):
         self.destroy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Ventana preview de archivos
-# ─────────────────────────────────────────────────────────────────────────────
-
 class FilePreviewWindow(ctk.CTkToplevel):
     def __init__(self, parent, stats, on_confirm):
         super().__init__(parent)
         self.title("📂  Archivos .rpy detectados")
-        self.geometry("600x440")
+        self.geometry("600x420")
         self.grab_set()
-        self.on_confirm = on_confirm
-        ctk.CTkLabel(
-            self,
-            text=f"{stats['total_files']} archivos .rpy  ·  {stats['total_lines']:,} líneas",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(padx=14, pady=(14,4))
+        ctk.CTkLabel(self,
+            text=f"{stats['total_files']} archivos  ·  {stats['total_lines']:,} líneas",
+            font=ctk.CTkFont(size=14, weight="bold")).pack(padx=14, pady=(14,4))
         box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Courier New", size=11))
         box.pack(fill="both", expand=True, padx=14, pady=4)
         box.configure(state="normal")
         for f in stats["files"]:
-            box.insert("end", f"  {f['lines']:>6} líneas   {f['name']}\n")
+            box.insert("end", f"  {f['lines']:>6}  {f['name']}\n")
         box.configure(state="disabled")
         bf = ctk.CTkFrame(self, fg_color="transparent")
         bf.pack(pady=10)
-        ctk.CTkButton(bf, text="✅  Continuar", width=200,
+        ctk.CTkButton(bf, text="✅  Continuar", width=180,
                       command=lambda: [on_confirm(), self.destroy()]).pack(side="left", padx=6)
         ctk.CTkButton(bf, text="✖  Cerrar", width=100,
                       fg_color="#7a1c1c", command=self.destroy).pack(side="left", padx=6)
@@ -124,11 +128,12 @@ class MainWindow(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.title(f"🎮  Ren'Py Translator Pro  v{APP_VERSION}")
-        self.geometry("1050x700")
-        self.minsize(900, 620)
+        self.geometry("1080x720")
+        self.minsize(900, 640)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.config_data = load_config()
+        self.exe_path    = ""
         self.project_dir = ""
         self.script_dir  = ""
         self.output_dir  = ""
@@ -140,37 +145,32 @@ class MainWindow(ctk.CTk):
         self._translator_obj = None
 
         self._build_ui()
-        self._log("Ren'Py Translator Pro v" + APP_VERSION + " listo.")
+        self._log(f"Ren'Py Translator Pro v{APP_VERSION} listo.")
         self._log("Selecciona el .exe del juego para empezar.")
 
-    # ── Layout principal ──────────────────────────────────────────────────────
+    # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Barra superior
         top = ctk.CTkFrame(self, corner_radius=0, height=48)
         top.pack(fill="x")
         top.pack_propagate(False)
         ctk.CTkLabel(top, text="🎮  Ren'Py Translator Pro",
-                     font=ctk.CTkFont(size=19, weight="bold")).pack(side="left", padx=18, pady=10)
+                     font=ctk.CTkFont(size=19, weight="bold")).pack(side="left", padx=18, pady=12)
         ctk.CTkButton(top, text="⚙  Ajustes", width=100, height=30,
                       command=self._open_settings).pack(side="right", padx=14, pady=9)
 
-        # Cuerpo: izquierda fija + derecha expandible
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=12, pady=(6,0))
 
-        # ── Panel izquierdo (scrollable) ──────────────────────────────────────
-        left = ctk.CTkScrollableFrame(body, width=300, label_text="")
+        left = ctk.CTkScrollableFrame(body, width=310)
         left.pack(side="left", fill="y", padx=(0,8))
 
-        # ── Panel derecho ─────────────────────────────────────────────────────
         right = ctk.CTkFrame(body)
         right.pack(side="left", fill="both", expand=True)
 
         self._build_left(left)
         self._build_right(right)
 
-        # Barra de estado
         self.status_var = tk.StringVar(value="Listo")
         sb = ctk.CTkFrame(self, corner_radius=0, height=24)
         sb.pack(fill="x", side="bottom")
@@ -178,61 +178,60 @@ class MainWindow(ctk.CTk):
                      font=ctk.CTkFont(size=11)).pack(side="left", padx=10)
 
     def _build_left(self, p):
-        """Panel izquierdo — todos los controles en un CTkScrollableFrame."""
-        W = 280  # ancho uniforme de widgets
+        W = 285
 
-        # ── Proyecto ──────────────────────────────────────────────────────────
         self._sec(p, "📁  Proyecto")
 
         ctk.CTkButton(p, text="🎮  Seleccionar .exe del juego",
-                      width=W, height=40,
+                      width=W, height=42,
                       fg_color="#1565c0", hover_color="#1976d2",
                       font=ctk.CTkFont(size=13, weight="bold"),
-                      command=self._select_exe).pack(pady=(2,3))
+                      command=self._select_exe).pack(pady=(2,4))
 
-        row1 = ctk.CTkFrame(p, fg_color="transparent")
-        row1.pack(pady=2)
-        ctk.CTkButton(row1, text="📂 Carpeta", width=134,
+        row = ctk.CTkFrame(p, fg_color="transparent")
+        row.pack(pady=2)
+        ctk.CTkButton(row, text="📂 Carpeta", width=138,
                       command=self._select_folder).pack(side="left", padx=(0,4))
-        ctk.CTkButton(row1, text="🗜 ZIP", width=134,
+        ctk.CTkButton(row, text="🗜 ZIP", width=138,
                       command=self._select_zip).pack(side="left")
 
         self.proj_label = ctk.CTkLabel(p, text="Ningún proyecto seleccionado",
                                        font=ctk.CTkFont(size=11), text_color="#78909c",
                                        wraplength=W)
-        self.proj_label.pack(pady=(2,0))
-
-        self.files_label = ctk.CTkLabel(p, text="",
-                                        font=ctk.CTkFont(size=11), text_color="#4fc3f7",
-                                        wraplength=W)
+        self.proj_label.pack(pady=(3,0))
+        self.files_label = ctk.CTkLabel(p, text="", font=ctk.CTkFont(size=11),
+                                        text_color="#4fc3f7", wraplength=W)
         self.files_label.pack()
-
         ctk.CTkButton(p, text="🔍  Ver archivos detectados", width=W, height=26,
                       command=self._show_preview).pack(pady=2)
 
-        # ── Salida ────────────────────────────────────────────────────────────
         self._sec(p, "💾  Carpeta de salida")
-        self.out_label = ctk.CTkLabel(p, text="Automática",
-                                      font=ctk.CTkFont(size=11), text_color="#78909c",
-                                      wraplength=W)
+        self.out_label = ctk.CTkLabel(p, text="Automática", font=ctk.CTkFont(size=11),
+                                      text_color="#78909c", wraplength=W)
         self.out_label.pack(pady=(2,0))
-        ctk.CTkButton(p, text="📂 Cambiar salida", width=W, height=28,
+        ctk.CTkButton(p, text="📂 Cambiar salida", width=W, height=26,
                       command=self._select_output).pack(pady=3)
 
-        # ── Motor / idioma ────────────────────────────────────────────────────
         self._sec(p, "🌐  Traducción")
-
         ctk.CTkLabel(p, text="Motor:", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", padx=4)
         self.engine_var = ctk.StringVar(value=self.config_data.get("default_engine", ENGINE_NAMES[0]))
         ctk.CTkOptionMenu(p, variable=self.engine_var, values=ENGINE_NAMES, width=W).pack(pady=(0,4))
-
         ctk.CTkLabel(p, text="Idioma destino:", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", padx=4)
         self.lang_var = ctk.StringVar(value=self.config_data.get("default_target_lang", "Spanish"))
         ctk.CTkOptionMenu(p, variable=self.lang_var, values=LANGUAGES, width=W).pack(pady=(0,4))
 
-        # ── Controles — siempre visibles ──────────────────────────────────────
-        self._sec(p, "🎬  Controles")
+        # ── Modo de extracción ────────────────────────────────────────────────
+        self._sec(p, "⚙  Modo de extracción")
+        self.mode_var = ctk.StringVar(value="zenpy")
+        ctk.CTkRadioButton(p, text="🐸 Modo Zenpy (Recomendado)\nUsa renpy translate — captura TODO",
+                           variable=self.mode_var, value="zenpy",
+                           font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=3)
+        ctk.CTkRadioButton(p, text="🔍 Modo Parser\nExtracción manual de .rpy",
+                           variable=self.mode_var, value="parser",
+                           font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=3)
 
+        # ── Controles ─────────────────────────────────────────────────────────
+        self._sec(p, "🎬  Controles")
         ctk.CTkButton(p, text="1.  Extraer texto", width=W, height=36,
                       command=self._run_extract).pack(pady=3)
         ctk.CTkButton(p, text="2.  Traducir", width=W, height=36,
@@ -241,32 +240,27 @@ class MainWindow(ctk.CTk):
                       command=self._run_apply).pack(pady=3)
 
         ctk.CTkButton(p, text="⚡  Auto completo (Recomendado)",
-                      width=W, height=44,
+                      width=W, height=46,
                       fg_color="#1b5e20", hover_color="#2e7d32",
                       font=ctk.CTkFont(size=13, weight="bold"),
-                      command=self._run_full).pack(pady=(8,3))
+                      command=self._run_full).pack(pady=(10,3))
 
         self.cancel_btn = ctk.CTkButton(
             p, text="⏹  Cancelar", width=W, height=30,
             fg_color="#7a1c1c", hover_color="#b71c1c",
             command=self._cancel, state="disabled")
         self.cancel_btn.pack(pady=3)
-
-        # Espaciador final para que el scroll funcione bien
-        ctk.CTkLabel(p, text="").pack(pady=10)
+        ctk.CTkLabel(p, text="").pack(pady=8)
 
     def _build_right(self, p):
-        # ── Barra de progreso ─────────────────────────────────────────────────
         pf = ctk.CTkFrame(p)
         pf.pack(fill="x", padx=8, pady=(8,4))
-        self.progress_label = ctk.CTkLabel(pf, text="Progreso: —",
-                                           font=ctk.CTkFont(size=12))
+        self.progress_label = ctk.CTkLabel(pf, text="Progreso: —", font=ctk.CTkFont(size=12))
         self.progress_label.pack(anchor="w", padx=12, pady=(6,2))
         self.progress_bar = ctk.CTkProgressBar(pf)
         self.progress_bar.set(0)
         self.progress_bar.pack(fill="x", padx=12, pady=(0,6))
 
-        # ── Stats ─────────────────────────────────────────────────────────────
         sf = ctk.CTkFrame(p, fg_color="transparent")
         sf.pack(fill="x", padx=8, pady=2)
         self.stat_files = ctk.CTkLabel(sf, text="Archivos: 0",   font=ctk.CTkFont(size=11), text_color="gray")
@@ -276,7 +270,6 @@ class MainWindow(ctk.CTk):
         for w in (self.stat_files, self.stat_segs, self.stat_trans, self.stat_cache):
             w.pack(side="left", padx=8)
 
-        # ── Segmentos ─────────────────────────────────────────────────────────
         sh = ctk.CTkFrame(p, fg_color="transparent")
         sh.pack(fill="x", padx=8, pady=(8,0))
         ctk.CTkLabel(sh, text="📋  Segmentos extraídos",
@@ -294,22 +287,19 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(ff, text="Limpiar log", width=90, height=24,
                       command=self._clear_log).pack(side="right", padx=4)
 
-        self.seg_box = ctk.CTkTextbox(p, font=ctk.CTkFont(family="Courier New", size=11), height=160)
+        self.seg_box = ctk.CTkTextbox(p, font=ctk.CTkFont(family="Courier New", size=11), height=150)
         self.seg_box.pack(fill="x", padx=8, pady=(2,4))
         self.seg_box.configure(state="disabled")
 
-        # ── Log ───────────────────────────────────────────────────────────────
-        ctk.CTkLabel(p, text="📝  Log",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", padx=10, pady=(4,0))
+        ctk.CTkLabel(p, text="📝  Log", font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", padx=10, pady=(4,0))
         self.log_box = ctk.CTkTextbox(p, font=ctk.CTkFont(family="Courier New", size=11))
         self.log_box.pack(fill="both", expand=True, padx=8, pady=(2,8))
         self.log_box.configure(state="disabled")
 
-    def _sec(self, parent, text):
-        ctk.CTkLabel(parent, text=text,
-                     font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(12,2))
+    def _sec(self, p, text):
+        ctk.CTkLabel(p, text=text, font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(12,2))
 
-    # ── Selección de proyecto ─────────────────────────────────────────────────
+    # ── Selección ─────────────────────────────────────────────────────────────
 
     def _select_exe(self):
         path = filedialog.askopenfilename(
@@ -317,13 +307,14 @@ class MainWindow(ctk.CTk):
             filetypes=[("Ejecutable", "*.exe *.sh"), ("Todos", "*.*")])
         if not path: return
         self._cleanup_temp()
+        self.exe_path = path
         self._log(f"[EXE] {path}")
         project_root, script_dir, rpy_files = find_project_from_exe(path, log=self._log)
         if not rpy_files:
             messagebox.showwarning("Sin archivos .rpy",
                 "No se encontraron archivos .rpy.\n\n"
-                "Los juegos distribuidos solo incluyen .rpyc (compilados).\n"
-                "Necesitas el código fuente .rpy para traducir.")
+                "Los juegos distribuidos solo incluyen .rpyc.\n"
+                "Necesitas el código fuente .rpy.")
             return
         self.project_dir = project_root
         self.script_dir  = script_dir
@@ -333,11 +324,11 @@ class MainWindow(ctk.CTk):
         self._update_files_label()
         self._auto_output(project_root, "_traducido")
         stats = preview_rpy_stats(rpy_files)
-        self._log(f"[EXE] {len(rpy_files)} archivos .rpy · {stats['total_lines']:,} líneas")
+        self._log(f"[EXE] {len(rpy_files)} archivos · {stats['total_lines']:,} líneas")
         FilePreviewWindow(self, stats, on_confirm=lambda: None)
 
     def _select_folder(self):
-        path = filedialog.askdirectory(title="Selecciona la carpeta del proyecto")
+        path = filedialog.askdirectory(title="Carpeta del proyecto Ren'Py")
         if not path: return
         self._cleanup_temp()
         self.project_dir = self.script_dir = path
@@ -349,7 +340,7 @@ class MainWindow(ctk.CTk):
 
     def _select_zip(self):
         path = filedialog.askopenfilename(
-            title="Selecciona el ZIP", filetypes=[("ZIP", "*.zip"), ("Todos", "*.*")])
+            title="ZIP del proyecto", filetypes=[("ZIP","*.zip"),("Todos","*.*")])
         if not path: return
         self._cleanup_temp()
         try:
@@ -390,10 +381,9 @@ class MainWindow(ctk.CTk):
             return
         FilePreviewWindow(self, preview_rpy_stats(self.rpy_files), on_confirm=lambda: None)
 
-    # ── Ajustes ───────────────────────────────────────────────────────────────
-
     def _open_settings(self):
-        SettingsWindow(self, self.config_data, on_save=lambda c: setattr(self, 'config_data', c) or self._log("[Config] Guardado."))
+        SettingsWindow(self, self.config_data,
+                       on_save=lambda c: [setattr(self,'config_data',c), self._log("[Config] Guardado.")])
 
     # ── Pipeline ──────────────────────────────────────────────────────────────
 
@@ -420,7 +410,6 @@ class MainWindow(ctk.CTk):
     def _cancel(self):
         if self._running and self._translator_obj:
             self._translator_obj.cancel()
-            self._log("[Cancel] Cancelando...")
 
     def _start(self, fn):
         if self._running:
@@ -438,25 +427,102 @@ class MainWindow(ctk.CTk):
 
     def _do_extract(self):
         try:
+            mode = self.mode_var.get()
             self._set_status("Extrayendo...")
-            from core.parser import RenpyParser
-            parser = RenpyParser(log_callback=self._log)
-            self.segments = []
-            files = self.rpy_files or collect_rpy_files(self.script_dir or self.project_dir)
-            total = len(files)
-            for i, fpath in enumerate(files, 1):
-                self.segments.extend(parser.parse_file(fpath))
-                self._set_progress(i/total*0.95, f"{i}/{total} archivos")
-            n = len(self.segments)
-            self._log(f"[Extraer] ✓ {n} segmentos")
-            self._refresh_segtable()
-            self._update_stats()
-            self._set_progress(1.0, f"✓ {n} segmentos")
-            self._set_status(f"Extraídos {n} segmentos.")
+
+            if mode == "zenpy" and self.exe_path:
+                self._extract_zenpy_mode()
+            else:
+                self._extract_parser_mode()
+
         except Exception as e:
-            self._log(f"[Extraer] Error: {e}")
+            import traceback
+            self._log(f"[Extraer] Error: {e}\n{traceback.format_exc()}")
         finally:
             self._done()
+
+    def _extract_zenpy_mode(self):
+        """
+        Modo Zenpy: usa renpy translate para generar tl/ automáticamente.
+        Si no funciona, cae al modo parser.
+        """
+        lang = self.lang_var.get()
+        lang_code = LANG_CODES.get(lang, lang.lower())
+
+        self._log(f"[Zenpy] Generando archivos de traducción para '{lang_code}'...")
+        self._log(f"[Zenpy] Esto puede tardar unos segundos...")
+
+        import subprocess, shutil
+
+        game_dir = self.script_dir
+        tl_dir = os.path.join(game_dir, "tl", lang_code)
+
+        # Intentar invocar renpy translate
+        success = False
+        try:
+            # Método: exe del juego con argumentos de Ren'Py
+            project_dir = os.path.dirname(game_dir)
+            cmd = [self.exe_path, project_dir, "translate", lang_code]
+            self._log(f"[Zenpy] Ejecutando: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, timeout=120,
+                                    cwd=os.path.dirname(self.exe_path))
+            if result.returncode == 0 and os.path.isdir(tl_dir):
+                success = True
+                self._log(f"[Zenpy] ✓ Archivos de traducción generados en: {tl_dir}")
+            else:
+                out = result.stdout.decode(errors='replace')[:300]
+                err = result.stderr.decode(errors='replace')[:300]
+                self._log(f"[Zenpy] Salida: {out}")
+                if err: self._log(f"[Zenpy] Error: {err}")
+        except subprocess.TimeoutExpired:
+            self._log("[Zenpy] Timeout al ejecutar el juego.")
+        except Exception as e:
+            self._log(f"[Zenpy] No se pudo invocar el exe: {e}")
+
+        if success and os.path.isdir(tl_dir):
+            # Parsear los archivos tl/ generados
+            self._log(f"[Zenpy] Parseando archivos de tl/{lang_code}/...")
+            parser = RenpyParser(log_callback=self._log)
+            self.segments = []
+            rpy_files = [os.path.join(tl_dir, f) for f in os.listdir(tl_dir) if f.endswith('.rpy')]
+            total = len(rpy_files)
+            for i, fpath in enumerate(rpy_files, 1):
+                segs = parser.parse_file(fpath)
+                self.segments.extend(segs)
+                self._set_progress(i/total, f"{i}/{total} archivos tl/")
+            n = len(self.segments)
+            self._log(f"[Zenpy] ✓ {n} segmentos extraídos desde tl/")
+            # Guardar el tl_dir para el apply
+            self._tl_dir = tl_dir
+            self._tl_lang_code = lang_code
+        else:
+            self._log("[Zenpy] Fallback al modo parser directo...")
+            self._extract_parser_mode()
+            return
+
+        self._refresh_segtable()
+        self._update_stats()
+        self._set_progress(1.0, f"✓ {len(self.segments)} segmentos")
+        self._set_status(f"Extraídos {len(self.segments)} segmentos (modo Zenpy).")
+
+    def _extract_parser_mode(self):
+        """Modo parser: extracción directa de los .rpy."""
+        self._log("[Parser] Extrayendo texto directamente de los .rpy...")
+        parser = RenpyParser(log_callback=self._log)
+        self.segments = []
+        files = self.rpy_files or collect_rpy_files(self.script_dir or self.project_dir)
+        total = max(len(files), 1)
+        for i, fpath in enumerate(files, 1):
+            segs = parser.parse_file(fpath)
+            self.segments.extend(segs)
+            if i % 5 == 0 or i == total:
+                self._set_progress(i/total * 0.95, f"{i}/{total} archivos")
+        n = len(self.segments)
+        self._log(f"[Parser] ✓ {n} segmentos extraídos")
+        self._refresh_segtable()
+        self._update_stats()
+        self._set_progress(1.0, f"✓ {n} segmentos")
+        self._set_status(f"Extraídos {n} segmentos (modo Parser).")
 
     def _do_translate(self):
         try:
@@ -466,8 +532,20 @@ class MainWindow(ctk.CTk):
             self._set_status(f"Traduciendo al {lang}...")
             t = self._make_translator()
             self.translations = t.translate(self.segments, engine, lang)
-            n = len(self.translations)
-            self._log(f"[Traducir] ✓ {n} traducciones")
+            n = len([v for v in self.translations.values() if v])
+            self._log(f"[Traducir] ✓ {n} segmentos traducidos")
+            if n == 0:
+                self._log("[Traducir] ⚠ NINGÚN segmento fue traducido.")
+                self._log("[Traducir] → Para Argos: descarga el pack de idioma primero")
+                self._log("[Traducir] → Para Gemini/OpenAI: verifica tu API key en ⚙ Ajustes")
+                self.after(0, lambda: messagebox.showwarning(
+                    "Sin traducciones",
+                    "No se tradujo ningún segmento.\n\n"
+                    "• Argos: necesita el pack de español instalado\n"
+                    "• Gemini: verifica tu API key en ⚙ Ajustes\n\n"
+                    "Recomendado: usa Google Gemini (gratis)\n"
+                    "Key en: aistudio.google.com/apikey"
+                ))
             self._update_stats()
             self._set_status(f"Traducidos {n}/{len(self.segments)} segmentos.")
         except Exception as e:
@@ -481,11 +559,11 @@ class MainWindow(ctk.CTk):
             t = self._make_translator()
             src = self.script_dir or self.project_dir
             count = t.apply(self.segments, self.translations, src, self.output_dir)
-            self._log(f"[Aplicar] ✓ {count} líneas → {self.output_dir}")
+            self._log(f"[Aplicar] ✓ {count} líneas modificadas → {self.output_dir}")
             self._set_progress(1.0, "✓ Listo")
             self._set_status(f"✓ Listo — {self.output_dir}")
             self.after(0, lambda: messagebox.showinfo("¡Listo!",
-                f"✓ Traducción aplicada\nLíneas modificadas: {count}\n\nSalida:\n{self.output_dir}"))
+                f"✓ Traducción aplicada\nLíneas: {count}\n\nSalida:\n{self.output_dir}"))
         except Exception as e:
             self._log(f"[Aplicar] Error: {e}")
         finally:
@@ -496,44 +574,57 @@ class MainWindow(ctk.CTk):
             engine = self._make_engine()
             if not engine: return
             lang = self.lang_var.get()
+            mode = self.mode_var.get()
 
             # 1. Extraer
-            self._log("[Auto] 1/3 Extrayendo...")
-            from core.parser import RenpyParser
-            parser = RenpyParser(log_callback=self._log)
-            self.segments = []
-            files = self.rpy_files or collect_rpy_files(self.script_dir or self.project_dir)
-            total = len(files)
-            for i, fpath in enumerate(files, 1):
-                self.segments.extend(parser.parse_file(fpath))
-                self._set_progress(i/total*0.3, f"Analizando {i}/{total}...")
+            self._log(f"[Auto] 1/3 Extrayendo ({mode} mode)...")
+            if mode == "zenpy" and self.exe_path:
+                self._extract_zenpy_mode()
+            else:
+                self._extract_parser_mode()
 
-            n = len(self.segments)
-            self._log(f"[Auto] {n} segmentos encontrados")
-            self._refresh_segtable()
-            self._update_stats()
             if not self.segments:
                 self._set_status("Sin texto encontrado.")
                 return
+
+            n = len(self.segments)
+            self._log(f"[Auto] {n} segmentos encontrados")
 
             # 2. Traducir
             self._log(f"[Auto] 2/3 Traduciendo al {lang}...")
             t = self._make_translator()
             self.translations = t.translate(self.segments, engine, lang)
+            translated = len([v for v in self.translations.values() if v])
             self._update_stats()
+            self._log(f"[Auto] {translated} traducciones producidas")
+
+            if translated == 0:
+                self._log("[Auto] ⚠ No se produjo ninguna traducción. Abortando apply.")
+                self.after(0, lambda: messagebox.showwarning(
+                    "Sin traducciones",
+                    "No se tradujo nada.\n\n"
+                    "Verifica el motor y la API key en ⚙ Ajustes.\n"
+                    "Recomendado: Google Gemini (gratis)"
+                ))
+                return
 
             # 3. Aplicar
-            self._log("[Auto] 3/3 Aplicando...")
+            self._log("[Auto] 3/3 Aplicando traducciones...")
             self._set_progress(0.95, "Aplicando...")
             src = self.script_dir or self.project_dir
             count = t.apply(self.segments, self.translations, src, self.output_dir)
 
             self._set_progress(1.0, "✓ Completo")
-            self._log(f"[Auto] ✓ {count} líneas modificadas")
-            self._set_status(f"✓ Completo — {self.output_dir}")
+            self._log(f"[Auto] ✓ {count} líneas modificadas → {self.output_dir}")
+            self._set_status(f"✓ Completo")
             self.after(0, lambda: messagebox.showinfo(
                 "¡Traducción completa!",
-                f"✅ ¡Listo!\n\nSegmentos: {n}\nLíneas modificadas: {count}\n\nSalida:\n{self.output_dir}"))
+                f"✅ ¡Listo!\n\n"
+                f"Segmentos: {n}\n"
+                f"Traducidos: {translated}\n"
+                f"Líneas modificadas: {count}\n\n"
+                f"Salida:\n{self.output_dir}"
+            ))
         except Exception as e:
             import traceback
             self._log(f"[Auto] Error: {e}\n{traceback.format_exc()}")
@@ -541,38 +632,35 @@ class MainWindow(ctk.CTk):
         finally:
             self._done()
 
-    # ── Tabla de segmentos ────────────────────────────────────────────────────
+    # ── Tabla segmentos ───────────────────────────────────────────────────────
 
     def _refresh_segtable(self, ftype="Todos"):
         segs = self.segments if ftype == "Todos" else [s for s in self.segments if s.seg_type == ftype]
         self.seg_box.configure(state="normal")
         self.seg_box.delete("1.0", "end")
-        self.seg_box.insert("end", f"{'TIPO':<16} {'LÍN':>5}  {'TEXTO'}\n")
+        self.seg_box.insert("end", f"{'TIPO':<16} {'LÍN':>5}  TEXTO\n")
         self.seg_box.insert("end", "─" * 70 + "\n")
         for seg in segs[:500]:
-            self.seg_box.insert("end",
-                f"{seg.seg_type:<16} {seg.line:>5}  {seg.text[:58].replace(chr(10),'↵')}\n")
+            txt = seg.text[:60].replace('\n','↵')
+            self.seg_box.insert("end", f"{seg.seg_type:<16} {seg.line:>5}  {txt}\n")
         if len(segs) > 500:
             self.seg_box.insert("end", f"\n  ... y {len(segs)-500} más\n")
         self.seg_box.configure(state="disabled")
         self.seg_count_lbl.configure(text=f"({len(segs)} segmentos)")
 
     def _apply_filter(self, v):
-        if self.segments:
-            self._refresh_segtable(v)
+        if self.segments: self._refresh_segtable(v)
 
-    # ── Utilidades ────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _check(self):
         if not self.project_dir:
-            messagebox.showwarning("Sin proyecto",
-                "Selecciona el .exe del juego, una carpeta o un .zip primero.")
+            messagebox.showwarning("Sin proyecto", "Selecciona el .exe, carpeta o ZIP primero.")
             return False
         return True
 
     def _make_translator(self):
-        t = Translator(config=self.config_data,
-                       log_callback=self._log,
+        t = Translator(config=self.config_data, log_callback=self._log,
                        progress_callback=self._on_progress)
         self._translator_obj = t
         return t
@@ -589,13 +677,19 @@ class MainWindow(ctk.CTk):
             if engine.requires_api_key:
                 self.after(0, lambda: messagebox.showwarning(
                     "API Key requerida",
-                    f"{name} necesita una API key.\nAbre ⚙ Ajustes y añádela."))
+                    f"{name} necesita una API key.\n"
+                    f"Abre ⚙ Ajustes y añádela.\n\n"
+                    f"Gemini es gratis en: aistudio.google.com/apikey"))
+                self._done()
+                return None
             elif "Argos" in name:
                 self._log("[Argos] Instalando pack de idioma...")
                 engine.ensure_language_pack(self.lang_var.get(), log=self._log)
                 if not engine.is_available:
                     self.after(0, lambda: messagebox.showwarning(
-                        "Argos no disponible", "Ejecuta: pip install argostranslate"))
+                        "Argos no disponible",
+                        "Ejecuta en terminal:\npip install argostranslate\n\n"
+                        "O usa Google Gemini (gratis)."))
                     self._done()
                     return None
             else:
@@ -606,8 +700,7 @@ class MainWindow(ctk.CTk):
         return engine
 
     def _on_progress(self, current, total):
-        if total > 0:
-            self._set_progress(current/total, f"{current}/{total}")
+        if total > 0: self._set_progress(current/total, f"{current}/{total}")
 
     def _set_progress(self, v, label=""):
         self.after(0, lambda: self.progress_bar.set(min(max(v,0),1)))
@@ -621,7 +714,8 @@ class MainWindow(ctk.CTk):
         def _do():
             self.stat_files.configure(text=f"Archivos: {len(self.rpy_files)}")
             self.stat_segs.configure(text=f"Segmentos: {len(self.segments)}")
-            self.stat_trans.configure(text=f"Traducidos: {len(self.translations)}")
+            n = len([v for v in self.translations.values() if v])
+            self.stat_trans.configure(text=f"Traducidos: {n}")
             try:
                 c = self._translator_obj.memory.size() if self._translator_obj else 0
                 self.stat_cache.configure(text=f"Caché: {c}")
@@ -648,7 +742,6 @@ class MainWindow(ctk.CTk):
             self.temp_dir = ""
 
     def _on_close(self):
-        if self._running and not messagebox.askyesno("Salir", "Hay una tarea en curso. ¿Salir?"):
-            return
+        if self._running and not messagebox.askyesno("Salir","Tarea en curso. ¿Salir?"): return
         self._cleanup_temp()
         self.destroy()
