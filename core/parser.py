@@ -1,13 +1,15 @@
 """
-Parser avanzado de archivos .rpy de Ren'Py.
-Extrae TODOS los tipos de texto traducible:
-  - Diálogos:         e "Hola"
-  - Narración:        "Texto narrado"
-  - Menús:            "Opción":
-  - Texto UI:         text/textbutton/label/placeholder "..."
-  - Bloques translate: translate spanish label_id:
-  - NVL:              nvl "texto"
-  - Strings con id:   old "..." / new "..."
+Parser avanzado de archivos .rpy de Ren'Py — v3.0
+Captura TODOS los textos traducibles incluyendo:
+  - Diálogos:            e "Hola"
+  - Narración:           "Texto"
+  - Menús:               "Opción":
+  - UI:                  text/textbutton/label "..."
+  - Bloques translate:   translate spanish label:
+  - Strings translate:   translate spanish strings: / old "x" / new "y"
+  - Tags {i}{b}{size}:   preservados, no bloquean extracción
+  - Líneas con extend:   extend "continuación"
+  - say con atributos:   e happy "Hola"
 """
 
 import re
@@ -17,7 +19,7 @@ from typing import List, Optional, Dict, Any
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Modelo de datos
+# Modelo
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -25,7 +27,7 @@ class Segment:
     text: str
     file: str
     line: int
-    seg_type: str       # dialogue | narration | menu | ui | translate_block | nvl
+    seg_type: str       # dialogue | narration | menu | ui | translate_block
     indent: str = ""
     context: Optional[str] = None
     char_id: Optional[str] = None
@@ -46,83 +48,85 @@ class Segment:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Expresiones regulares
+# Utilidades regex
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Cadena entre comillas (simple o doble), acepta escapes
-_QSTR = r'(?P<q>["\'])(?P<text>(?:[^"\'\\]|\\.)*)(?P=q)'
+def _extract_string(line: str):
+    """
+    Extrae la primera cadena entre comillas de una línea.
+    Soporta comillas dobles y simples, con escapes.
+    Retorna (texto, quote_char, start, end) o None.
+    """
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if c in ('"', "'"):
+            q = c
+            i += 1
+            buf = []
+            while i < n:
+                ch = line[i]
+                if ch == '\\' and i + 1 < n:
+                    buf.append(ch)
+                    buf.append(line[i+1])
+                    i += 2
+                    continue
+                if ch == q:
+                    return (''.join(buf), q, i - len(buf) - 1, i + 1)
+                buf.append(ch)
+                i += 1
+            return None  # cadena sin cerrar
+        i += 1
+    return None
 
-# Diálogo:  e "Hello"  /  mcth "..."  (con o sin paréntesis extra)
-RE_DIALOGUE = re.compile(
-    r'^(?P<indent>\s*)(?P<char>[a-zA-Z_]\w*)\s+' + _QSTR + r'\s*$'
-)
 
-# Narración pura: solo una cadena en la línea
-RE_NARRATION = re.compile(
-    r'^(?P<indent>\s*)' + _QSTR + r'\s*$'
-)
-
-# Opción de menú: "texto":
-RE_MENU_CHOICE = re.compile(
-    r'^(?P<indent>\s*)' + _QSTR + r'\s*:\s*$'
-)
-
-# Elementos UI
-RE_UI = re.compile(
-    r'^(?P<indent>\s*)(?P<kw>text|textbutton|label|placeholder|input_prompt|'
-    r'imagebutton|hotspot)\s+' + _QSTR + r'(?P<rest>.*)$'
-)
-
-# Cabecera de bloque translate
-RE_TRANSLATE_HDR = re.compile(
-    r'^(?P<indent>\s*)translate\s+(?P<lang>\w+)\s+(?P<label>\S+)\s*:\s*$'
-)
-
-# Comentario original dentro de translate block: # e "texto"  o  # "texto"
-RE_TRANSLATE_CMT = re.compile(
-    r'^(?P<indent>\s*)#\s*(?:(?P<char>[a-zA-Z_]\w*)\s+)?' + _QSTR + r'\s*$'
-)
-
-# Línea activa dentro de translate block
-RE_TRANSLATE_ACTIVE = re.compile(
-    r'^(?P<indent>\s*)(?:(?P<char>[a-zA-Z_]\w*)\s+)?' + _QSTR + r'\s*$'
-)
-
-# String viejo/nuevo en bloques translate string
-RE_OLD_NEW = re.compile(
-    r'^(?P<indent>\s*)(?P<kw>old|new)\s+' + _QSTR + r'\s*$'
-)
-
-# Palabras clave de Ren'Py que NO son IDs de personaje
+# Palabras clave que NO son personajes
 _KW = {
-    "menu", "label", "screen", "init", "python", "if", "elif", "else",
-    "with", "show", "hide", "play", "stop", "queue", "return", "jump",
-    "call", "pass", "while", "for", "define", "default", "image",
-    "transform", "style", "translate", "voice", "window", "nvl",
-    "scene", "pause", "renpy", "config", "persistent", "True", "False",
-    "None", "not", "and", "or", "in", "is", "text", "textbutton",
-    "vbox", "hbox", "frame", "add", "null", "bar", "key", "timer",
-    "viewport", "side", "grid", "fixed", "button", "imagebutton",
-    "hotspot", "input", "use", "at", "as", "onlayer", "zorder",
-    "old", "new", "strings", "python", "early",
+    "if", "elif", "else", "while", "for", "pass", "return",
+    "menu", "label", "screen", "init", "python", "define", "default",
+    "image", "transform", "style", "translate", "voice",
+    "show", "hide", "scene", "with", "play", "stop", "queue",
+    "call", "jump", "window", "nvl", "pause", "renpy",
+    "config", "persistent", "True", "False", "None",
+    "not", "and", "or", "in", "is",
+    "text", "textbutton", "label", "vbox", "hbox", "frame",
+    "add", "null", "bar", "key", "timer", "viewport", "side",
+    "grid", "fixed", "button", "imagebutton", "hotspot", "input",
+    "use", "at", "as", "onlayer", "zorder", "old", "new",
+    "strings", "early", "extend",
 }
 
-def _valid_char(name: str) -> bool:
-    return (name not in _KW and
-            name.lower() not in _KW and
-            bool(re.match(r'^[a-zA-Z_]\w*$', name)))
+def _is_char(token: str) -> bool:
+    """¿Puede ser un ID de personaje Ren'Py?"""
+    return (token not in _KW and
+            token.lower() not in _KW and
+            bool(re.match(r'^[a-zA-Z_]\w*$', token)) and
+            not token[0].isupper())  # los IDs suelen ser minúsculas
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Parser principal
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Patrones clave
+RE_TRANSLATE_HDR = re.compile(
+    r'^(?P<indent>\s*)translate\s+(?P<lang>\w+)\s+(?P<label>\S+)\s*:\s*$'
+)
+RE_UI_KW = re.compile(
+    r'^\s*(text|textbutton|label|placeholder|input_prompt)\s+'
+)
+RE_MENU = re.compile(r'^\s*menu\s*(\w+\s*)?:')
+RE_COMMENT_STR = re.compile(r'^\s*#')
+RE_OLD = re.compile(r'^\s*old\s+')
+RE_NEW = re.compile(r'^\s*new\s+')
+RE_EXTEND = re.compile(r'^\s*extend\s+')
+
+
 class RenpyParser:
 
     def __init__(self, log_callback=None):
         self.log = log_callback or (lambda m: None)
-
-    # ── API pública ───────────────────────────────────────────────────────────
 
     def parse_file(self, filepath: str) -> List[Segment]:
         try:
@@ -134,7 +138,6 @@ class RenpyParser:
         return self._parse(lines, filepath)
 
     def parse_project(self, project_dir: str) -> List[Segment]:
-        """Recorre recursivamente un directorio buscando .rpy."""
         segments = []
         for root, dirs, files in os.walk(project_dir):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
@@ -146,170 +149,271 @@ class RenpyParser:
                     segments.extend(segs)
         return segments
 
-    # ── Motor interno ─────────────────────────────────────────────────────────
-
     def _parse(self, lines: List[str], filepath: str) -> List[Segment]:
         segments: List[Segment] = []
 
         in_translate   = False
         trans_lang     = None
         trans_label    = None
-        trans_indent   = ""
+        trans_indent_n = 0
         last_cmt_text  = None
         last_cmt_line  = None
+        in_trans_strings = False
 
         in_menu        = False
-        menu_indent    = ""
-
-        in_trans_strings = False   # translate lang strings:
+        menu_indent_n  = 0
 
         i = 0
         while i < len(lines):
-            raw     = lines[i]
+            raw      = lines[i]
             stripped = raw.rstrip('\n')
             line_no  = i + 1
             content  = stripped.lstrip()
+            indent_n = len(stripped) - len(content)
             i += 1
 
-            # ── Saltar vacías ─────────────────────────────────────────────────
             if not content:
                 continue
 
-            # ── Comentarios puros (fuera de bloque translate) ─────────────────
-            if not in_translate and content.startswith('#'):
-                continue
-
-            # ── Líneas $, // ──────────────────────────────────────────────────
-            if content.startswith(('$', '//')):
-                continue
-
-            # ── Cabecera de bloque translate ──────────────────────────────────
+            # ── Cabecera translate ────────────────────────────────────────────
             m = RE_TRANSLATE_HDR.match(stripped)
             if m:
-                in_translate   = True
-                trans_lang     = m.group('lang')
-                trans_label    = m.group('label')
-                trans_indent   = m.group('indent')
-                last_cmt_text  = None
-                last_cmt_line  = None
-                # "translate lang strings:" — bloque de strings
-                in_trans_strings = (trans_label == 'strings')
+                in_translate      = True
+                trans_lang        = m.group('lang')
+                trans_label       = m.group('label')
+                trans_indent_n    = indent_n
+                last_cmt_text     = None
+                last_cmt_line     = None
+                in_trans_strings  = (trans_label == 'strings')
+                in_menu           = False
                 continue
 
             # ── Dentro de bloque translate ────────────────────────────────────
             if in_translate:
-                cur_ind    = len(stripped) - len(stripped.lstrip())
-                header_ind = len(trans_indent)
-
-                # ¿Salimos del bloque?
-                if content and cur_ind <= header_ind and not content.startswith('#'):
-                    in_translate = False
+                # ¿Salimos? (dedent al nivel de la cabecera o menos, sin ser comentario)
+                if content and indent_n <= trans_indent_n and not content.startswith('#'):
+                    in_translate     = False
                     in_trans_strings = False
-                    last_cmt_text = None
-                    # Caer hacia el procesamiento normal
-
+                    last_cmt_text    = None
+                    # fall through
                 else:
                     # Comentario con original
-                    mc = RE_TRANSLATE_CMT.match(stripped)
-                    if mc:
-                        last_cmt_text = mc.group('text')
-                        last_cmt_line = line_no
+                    if content.startswith('#'):
+                        # Extraer texto del comentario: # [char] "texto"
+                        after_hash = content[1:].lstrip()
+                        result = _extract_string(after_hash)
+                        if result:
+                            last_cmt_text = result[0]
+                            last_cmt_line = line_no
                         continue
 
-                    # old/new en strings block
-                    mo = RE_OLD_NEW.match(stripped)
-                    if mo and mo.group('kw') == 'new' and mo.group('text').strip():
-                        seg = Segment(
-                            text=mo.group('text'), file=filepath, line=line_no,
-                            seg_type='translate_block',
-                            indent=mo.group('indent'),
-                            translate_lang=trans_lang,
-                            translate_label=trans_label,
-                            raw_line=stripped, quote_char=mo.group('q'),
-                            context=last_cmt_text,
-                        )
-                        segments.append(seg)
-                        last_cmt_text = None
+                    # old "texto" (solo registrar como contexto)
+                    if RE_OLD.match(content):
+                        result = _extract_string(content[content.index('"' if '"' in content else "'"):])
+                        if result:
+                            last_cmt_text = result[0]
                         continue
 
-                    # Línea activa traducible
-                    ma = RE_TRANSLATE_ACTIVE.match(stripped)
-                    if ma and ma.group('text').strip() and not content.startswith('#'):
-                        char_id = ma.group('char')
-                        if char_id and not _valid_char(char_id):
-                            char_id = None
-                        seg = Segment(
-                            text=ma.group('text'), file=filepath, line=line_no,
-                            seg_type='translate_block',
-                            indent=ma.group('indent'),
-                            char_id=char_id,
-                            translate_lang=trans_lang,
-                            translate_label=trans_label,
-                            raw_line=stripped, quote_char=ma.group('q'),
-                            orig_comment_line=last_cmt_line,
-                            context=last_cmt_text,
-                        )
+                    # new "texto"
+                    if RE_NEW.match(content):
+                        result = _extract_string(content[content.index('"' if '"' in content else "'"):])
+                        if result and result[0].strip():
+                            seg = Segment(
+                                text=result[0], file=filepath, line=line_no,
+                                seg_type='translate_block',
+                                indent=' ' * indent_n,
+                                translate_lang=trans_lang,
+                                translate_label=trans_label,
+                                raw_line=stripped,
+                                quote_char=result[1],
+                                context=last_cmt_text,
+                            )
+                            segments.append(seg)
+                            last_cmt_text = None
+                        continue
+
+                    # Línea activa: [char [atribs]] "texto"
+                    # Puede ser:  e "Hola"  /  e happy "Hola"  /  "Hola"
+                    seg = self._parse_say_line(
+                        stripped, filepath, line_no,
+                        seg_type='translate_block',
+                        translate_lang=trans_lang,
+                        translate_label=trans_label,
+                        context=last_cmt_text,
+                        orig_comment_line=last_cmt_line,
+                    )
+                    if seg:
                         segments.append(seg)
                         last_cmt_text = None
                         last_cmt_line = None
                     continue
 
-            # ─── Procesamiento normal (fuera de translate) ────────────────────
+            # ─── Fuera de translate ───────────────────────────────────────────
 
-            # ── Detectar inicio de menú ───────────────────────────────────────
-            if re.match(r'^\s*menu\b', stripped):
-                in_menu    = True
-                menu_indent = re.match(r'^(\s*)', stripped).group(1)
+            # Saltar comentarios y líneas $, //
+            if content.startswith(('#', '$', '//')):
+                continue
+
+            # ── Inicio de menú ────────────────────────────────────────────────
+            if RE_MENU.match(stripped):
+                in_menu       = True
+                menu_indent_n = indent_n
                 continue
 
             # ── Salida de menú ────────────────────────────────────────────────
             if in_menu:
-                cur_ind  = len(stripped) - len(stripped.lstrip())
-                menu_ind = len(menu_indent)
-                if content and cur_ind <= menu_ind:
+                if content and indent_n <= menu_indent_n:
                     in_menu = False
-                    # caer hacia procesamiento normal
+                    # fall through
+                else:
+                    # Opción de menú: "texto":
+                    result = _extract_string(content)
+                    if result and content.rstrip().endswith(':'):
+                        # Es una opción de menú
+                        text = result[0].strip()
+                        if text and not text.startswith('{') :
+                            seg = Segment(
+                                text=text, file=filepath, line=line_no,
+                                seg_type='menu',
+                                indent=' ' * indent_n,
+                                raw_line=stripped,
+                                quote_char=result[1],
+                            )
+                            segments.append(seg)
+                    continue
 
-            if in_menu:
-                mc = RE_MENU_CHOICE.match(stripped)
-                if mc and mc.group('text').strip():
-                    segments.append(Segment(
-                        text=mc.group('text'), file=filepath, line=line_no,
-                        seg_type='menu', indent=mc.group('indent'),
-                        raw_line=stripped, quote_char=mc.group('q'),
-                    ))
+            # ── UI keywords ───────────────────────────────────────────────────
+            if RE_UI_KW.match(stripped):
+                result = _extract_string(content)
+                if result and result[0].strip():
+                    kw = content.split()[0]
+                    seg = Segment(
+                        text=result[0], file=filepath, line=line_no,
+                        seg_type='ui',
+                        indent=' ' * indent_n,
+                        raw_line=stripped,
+                        quote_char=result[1],
+                        context=kw,
+                    )
+                    segments.append(seg)
                 continue
 
-            # ── UI ────────────────────────────────────────────────────────────
-            mu = RE_UI.match(stripped)
-            if mu and mu.group('text').strip():
-                segments.append(Segment(
-                    text=mu.group('text'), file=filepath, line=line_no,
-                    seg_type='ui', indent=mu.group('indent'),
-                    raw_line=stripped, quote_char=mu.group('q'),
-                    context=mu.group('kw'),
-                ))
+            # ── extend "texto" ────────────────────────────────────────────────
+            if RE_EXTEND.match(stripped):
+                result = _extract_string(content[len('extend'):])
+                if result and result[0].strip():
+                    seg = Segment(
+                        text=result[0], file=filepath, line=line_no,
+                        seg_type='dialogue',
+                        indent=' ' * indent_n,
+                        raw_line=stripped,
+                        quote_char=result[1],
+                        char_id='extend',
+                    )
+                    segments.append(seg)
                 continue
 
-            # ── Diálogo ───────────────────────────────────────────────────────
-            md = RE_DIALOGUE.match(stripped)
-            if md and _valid_char(md.group('char')) and md.group('text').strip():
-                segments.append(Segment(
-                    text=md.group('text'), file=filepath, line=line_no,
-                    seg_type='dialogue', indent=md.group('indent'),
-                    char_id=md.group('char'),
-                    raw_line=stripped, quote_char=md.group('q'),
-                ))
-                continue
-
-            # ── Narración ─────────────────────────────────────────────────────
-            mn = RE_NARRATION.match(stripped)
-            if mn and mn.group('text').strip():
-                segments.append(Segment(
-                    text=mn.group('text'), file=filepath, line=line_no,
-                    seg_type='narration', indent=mn.group('indent'),
-                    raw_line=stripped, quote_char=mn.group('q'),
-                ))
-                continue
+            # ── Diálogo / narración ───────────────────────────────────────────
+            seg = self._parse_say_line(stripped, filepath, line_no)
+            if seg:
+                segments.append(seg)
 
         return segments
+
+    def _parse_say_line(
+        self, stripped: str, filepath: str, line_no: int,
+        seg_type: str = None,
+        translate_lang: str = None,
+        translate_label: str = None,
+        context: str = None,
+        orig_comment_line: int = None,
+    ) -> Optional[Segment]:
+        """
+        Intenta parsear una línea como diálogo o narración.
+        Soporta:
+          "texto"                    → narración
+          e "texto"                  → diálogo
+          e happy "texto"            → diálogo con atributo
+          e happy worried "texto"    → diálogo con múltiples atributos
+        """
+        content = stripped.lstrip()
+        indent_n = len(stripped) - len(content)
+
+        if not content or content.startswith(('#', '$', '//', 'translate', 'label',
+                                               'screen', 'init', 'python', 'define',
+                                               'default', 'image', 'transform', 'style',
+                                               'if ', 'elif ', 'else:', 'while ', 'for ',
+                                               'with ', 'show ', 'hide ', 'scene ', 'play ',
+                                               'stop ', 'queue ', 'call ', 'jump ', 'return',
+                                               'pass', 'window', 'nvl ', 'pause', 'voice ',
+                                               'menu', 'vbox', 'hbox', 'frame', 'add ',
+                                               'null', 'bar', 'key ', 'timer', 'viewport',
+                                               'side', 'grid', 'fixed', 'button', 'use ',
+                                               'at ', 'onlayer', 'zorder')):
+            return None
+
+        tokens = content.split()
+        if not tokens:
+            return None
+
+        # Caso 1: empieza con comilla → narración
+        if tokens[0].startswith(('"', "'")):
+            result = _extract_string(content)
+            if result and result[0].strip():
+                return Segment(
+                    text=result[0], file=filepath, line=line_no,
+                    seg_type=seg_type or 'narration',
+                    indent=' ' * indent_n,
+                    raw_line=stripped,
+                    quote_char=result[1],
+                    translate_lang=translate_lang,
+                    translate_label=translate_label,
+                    context=context,
+                    orig_comment_line=orig_comment_line,
+                )
+            return None
+
+        # Caso 2: primer token es un identificador
+        first = tokens[0]
+        if not re.match(r'^[a-zA-Z_]\w*$', first):
+            return None
+
+        # Buscar la primera comilla en la línea
+        result = _extract_string(content)
+        if not result or not result[0].strip():
+            return None
+
+        # Verificar que lo que está antes de la cadena son solo identificadores/atributos
+        before_quote = content[:result[2]].strip()
+        parts = before_quote.split()
+
+        if not parts:
+            return None
+
+        char_id = parts[0]
+
+        # El primer token no debe ser una keyword
+        if char_id.lower() in _KW:
+            return None
+
+        # Debe ser un identificador válido
+        if not re.match(r'^[a-zA-Z_]\w*$', char_id):
+            return None
+
+        # Los tokens intermedios (atributos) deben ser palabras simples
+        for attr in parts[1:]:
+            if not re.match(r'^[a-zA-Z_@\-]\w*$', attr):
+                return None
+
+        return Segment(
+            text=result[0], file=filepath, line=line_no,
+            seg_type=seg_type or 'dialogue',
+            indent=' ' * indent_n,
+            char_id=char_id,
+            raw_line=stripped,
+            quote_char=result[1],
+            translate_lang=translate_lang,
+            translate_label=translate_label,
+            context=context,
+            orig_comment_line=orig_comment_line,
+        )
